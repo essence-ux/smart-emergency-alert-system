@@ -1,112 +1,122 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+/ Your Blynk credentials
+// Get these from the Blynk console
+#define BLYNK_TEMPLATE_ID "TMPL38PRzStkq"
+#define BLYNK_TEMPLATE_NAME "ALERT"
+#define BLYNK_AUTH_TOKEN "jKsKfMJDVBzck6Q1DO5bRs38WWP7vaIT"
+#include <BlynkSimpleEsp32.h>
+#include <HardwareSerial.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "driver/gpio.h"
-#include "nvs_flash.h"
-#include "sdkconfig.h"
+// Your WiFi credentials
+const char* ssid = "Shadow";
+const char* password = "genm7544";
 
-#include "comms.h"
+// Serial ports
+HardwareSerial gps(2); // GPS
 
-static const char *TAG = "main";
+// Pin definitions
+#define GAS_PIN 34
+#define FLAME_PIN 25
+#define BUTTON_PIN 32
 
-/* Define the sensor input pins */
-#define PIN_FLAME GPIO_NUM_33
-#define PIN_GAS   GPIO_NUM_32
-#define PIN_SOS   GPIO_NUM_25
+// Flags
+bool alertTriggered = false;
 
-/* Convert coordinate strings from sdkconfig to doubles */
-static double get_fixed_lat(void)
-{
-    const char *s = CONFIG_FIXED_LAT;
-    return s ? atof(s) : 0.0;
-}
-static double get_fixed_lon(void)
-{
-    const char *s = CONFIG_FIXED_LON;
-    return s ? atof(s) : 0.0;
-}
-
-/* Basic debounce function to avoid false triggering */
-static int read_debounced(gpio_num_t pin)
-{
-    int stable = gpio_get_level(pin);
-    for (int i = 0; i < 5; ++i) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        int v = gpio_get_level(pin);
-        if (v != stable) return -1; // unstable reading
-    }
-    return stable;
+// Timers for non-blocking code
+unsigned long previousMillis = 0;
+const long interval = 1000; // Interval to read sensors (in milliseconds)
+BLYNK_CONNECTED() {
+  Serial.println("✅ Connected to Blynk");
+  Blynk.logEvent("network_connected", "Connection secure");
 }
 
-/* Task that monitors sensors continuously */
-void sensor_task(void *arg)
-{
-    double lat = get_fixed_lat();
-    double lon = get_fixed_lon();
+void setup() {
+  Serial.begin(115200);
 
-    while (1) {
-        int flame = read_debounced(PIN_FLAME);
-        int gas   = read_debounced(PIN_GAS);
-        int sos   = read_debounced(PIN_SOS);
+  // Sensor setup
+  pinMode(GAS_PIN, INPUT);
+  pinMode(FLAME_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-        // Adjust active levels depending on your hardware logic
-        if (flame == 0) {
-            ESP_LOGI(TAG, "Flame detected — sending alert");
-            comms_send_alert("flame", lat, lon);
-            vTaskDelay(pdMS_TO_TICKS(2000));
-        }
+  // GPS Serial (RX, TX)
+  gps.begin(9600, SERIAL_8N1, 16, 17);
 
-        if (gas == 1) {
-            ESP_LOGI(TAG, "Gas leak detected — sending alert");
-            comms_send_alert("gas", lat, lon);
-            vTaskDelay(pdMS_TO_TICKS(2000));
-        }
-
-        if (sos == 1) {
-            ESP_LOGI(TAG, "SOS button pressed — sending alert");
-            comms_send_alert("sos", lat, lon);
-            vTaskDelay(pdMS_TO_TICKS(2000));
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(250));
-    }
+  Serial.println("Connecting to Blynk...");
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, password);
 }
 
-/* Main application entry */
-void app_main(void)
-{
-    esp_err_t ret;
+void loop() {
+  // This must be called frequently to maintain the Blynk connection
+  Blynk.run();
 
-    ESP_LOGI(TAG, "Starting Smart Emergency Alert System (ESP32 + Blynk)");
+  // Use a non-blocking timer to read sensors and print to Serial
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
 
-    /* Initialize NVS (non-volatile storage) required by Wi-Fi */
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    int gasValue = analogRead(GAS_PIN);
+    int flameValue = digitalRead(FLAME_PIN);
+    int buttonValue = digitalRead(BUTTON_PIN);
+
+    Serial.print("Gas: "); Serial.print(gasValue);
+    Serial.print(" | Flame: "); Serial.print(flameValue);
+    Serial.print(" | Button: "); Serial.println(buttonValue);
+
+    // Trigger conditions
+    if (gasValue > 3250 ){
+      if (!alertTriggered) {
+        Serial.println("Trigger condition met. Attempting to send notification...");
+        // Read GPS data
+        String gpsData = readGPS();
+        // Send a Blynk notification
+        Blynk.logEvent("gas_detected",gpsData);
+        Serial.println("Blynk notification sent!");
+        alertTriggered = true; // prevent repeated logging
+      }
     }
-    ESP_ERROR_CHECK(ret);
-
-    /* Configure sensor pins as input */
-    gpio_config_t io_conf = {
-        .intr_type = GPIO_INTR_DISABLE,
-        .mode = GPIO_MODE_INPUT,
-        .pin_bit_mask = (1ULL << PIN_FLAME) | (1ULL << PIN_GAS) | (1ULL << PIN_SOS),
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-    };
-    gpio_config(&io_conf);
-
-    /* Initialize Wi-Fi + Blynk communication */
-    int r = comms_init();
-    if (r != 0) {
-        ESP_LOGW(TAG, "comms_init failed (%d). Continuing; alerts will fail until Wi-Fi connects.", r);
+    if(flameValue == LOW ){
+      if (!alertTriggered) {
+        Serial.println("Trigger condition met. Attempting to send notification...");
+        // Read GPS data
+        String gpsData = readGPS();
+        // Send a Blynk notification
+        Blynk.logEvent("fire_detected",gpsData);
+        Serial.println("Blynk notification sent!");
+        alertTriggered = true; // prevent repeated logging
+      }
+    } 
+    if(buttonValue == LOW){
+      if (!alertTriggered) {
+        Serial.println("Trigger condition met. Attempting to send notification...");
+        // Read GPS data
+        String gpsData = readGPS();
+        // Send a Blynk notification
+        Blynk.logEvent("manual_emergency",gpsData);
+        Serial.println("Blynk notification sent!");
+        alertTriggered = true; // prevent repeated logging
+      }
+    }  else {
+      alertTriggered = false; // reset when conditions are safe
     }
+  }
+}
 
-    /* Create the sensor monitoring task */
-    xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
+// --- Get GPS data ---
+String readGPS() {
+  String lat = "12.973052"; // fallback demo
+  String lon = "80.044600"; // fallback demo
+
+  unsigned long start = millis();
+  while (millis() - start < 3000) { // wait 3s for GPS
+    if (gps.available()) {
+      String nmea = gps.readStringUntil('\n');
+      if (nmea.startsWith("$GPGGA")) {
+        // For simplicity we just return demo coords
+        // (can parse NMEA properly using TinyGPS++)
+        return "https://maps.google.com/?q=" + lat + "," + lon;
+      }
+    }
+  }
+  return "https://maps.google.com/?q=" + lat + "," + lon;
 }
