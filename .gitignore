@@ -1,0 +1,28 @@
+/build/
+*.bin
+*.elf
+*.map
+*.log
+
+# SDK configuration
+sdkconfig
+sdkconfig.old
+
+# IDE / editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Environment or secret files
+.env
+*.env
+*.secret
